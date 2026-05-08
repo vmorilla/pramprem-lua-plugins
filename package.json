@@ -1,0 +1,20 @@
+{
+    "name": "pramprem",
+    "displayName": "Pramprem",
+    "description": "Collection of Aseprite plugins by el Pramprem",
+    "version": "1.0.0",
+    "author": {
+        "name": "Pramprem"
+    },
+    "license": "MIT",
+    "categories": [
+        "Scripts"
+    ],
+    "contributes": {
+        "scripts": [
+            {
+                "path": "./pramprem.lua"
+            }
+        ]
+    }
+}
