@@ -43,15 +43,6 @@ Applies a noise dithering pattern to a flat color in the active cel. Works with 
 
 3. Both commands will appear under **Edit → Pramprem** in the menu.
 
-### As standalone scripts
-
-Each `.lua` file can also be run directly via **File → Scripts** in Aseprite:
-
-- `color-swap.lua` — opens the Color Swap dialog immediately
-- `noise-texture.lua` — opens the Noise Texture dialog immediately
-
----
-
 ## Project Structure
 
 ```
