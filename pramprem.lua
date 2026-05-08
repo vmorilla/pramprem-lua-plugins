@@ -20,10 +20,11 @@ function init(plugin)
         group = "edit_fill",
     }
     plugin:newCommand {
-        id      = "PrampremColorSwap",
-        title   = "Color Swap...",
-        group   = "pramprem_group",
-        onclick = colorSwap,
+        id        = "PrampremColorSwap",
+        title     = "Color Swap...",
+        group     = "pramprem_group",
+        onclick   = colorSwap,
+        onenabled = function() return app.sprite ~= nil end,
     }
     plugin:newCommand {
         id        = "PrampremNoiseTexture",

@@ -84,10 +84,18 @@ end
 -- ─── Core swap logic ─────────────────────────────────────────────────────────
 
 -- Applies swap to a standalone (unattached) image in-place.
+-- selection, offX, offY are optional; when a non-empty selection is given only
+-- pixels whose sprite-space coordinates fall inside it are touched.
 -- Returns the number of pixels changed.
-local function applySwapToImage(img, refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol)
-    local count = 0
+local function applySwapToImage(img, refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol, selection, offX, offY)
+    local count  = 0
+    local useSel = selection and not selection.isEmpty
+    offX         = offX or 0
+    offY         = offY or 0
     for it in img:pixels() do
+        if useSel and not selection:contains(Point(it.x + offX, it.y + offY)) then
+            goto continue
+        end
         local pixVal = it()
         local pr = app.pixelColor.rgbaR(pixVal)
         local pg = app.pixelColor.rgbaG(pixVal)
@@ -109,6 +117,7 @@ local function applySwapToImage(img, refH, refS, refV, tgtH, tgtS, tgtV, hueTol,
                 count = count + 1
             end
         end
+        ::continue::
     end
     return count
 end
@@ -118,10 +127,12 @@ end
 -- back to the cel -- the assignment is what Aseprite records for undo.
 local function applySwapWithUndo(sprite, refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol)
     local replaced = 0
+    local sel      = sprite.selection
     app.transaction("Color Swap", function()
         for _, cel in ipairs(sprite.cels) do
             local copy = cel.image:clone()
-            local n = applySwapToImage(copy, refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol)
+            local n = applySwapToImage(copy, refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol,
+                sel, cel.position.x, cel.position.y)
             if n > 0 then
                 cel.image = copy -- assignment to cel.image is recorded by undo
                 replaced = replaced + n
@@ -181,6 +192,16 @@ function colorSwap()
     -- applied flag: prevents onclose from restoring after a successful Apply
     local applied = false
 
+    local function saveSettings()
+        local d                = dlg.data
+        lastSettings.ref_color = d.ref_color
+        lastSettings.tgt_color = d.tgt_color
+        lastSettings.hue_tol   = d.hue_tol
+        lastSettings.sat_tol   = d.sat_tol
+        lastSettings.val_tol   = d.val_tol
+        lastSettings.preview   = d.preview
+    end
+
     -- Forward declaration so button callbacks can reference dlg
     local dlg
 
@@ -200,13 +221,15 @@ function colorSwap()
     local function applyPreview()
         restoreAll()
         local refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol = getHsvParams()
-        local frameNum = app.frame.frameNumber
+        local frameNum                                                   = app.frame.frameNumber
+        local sel                                                        = sprite.selection
         for _, cel in ipairs(sprite.cels) do
             if cel.frameNumber == frameNum then
                 applySwapToImage(cel.image,
                     refH, refS, refV,
                     tgtH, tgtS, tgtV,
-                    hueTol, satTol, valTol)
+                    hueTol, satTol, valTol,
+                    sel, cel.position.x, cel.position.y)
             end
         end
         app.refresh()
@@ -314,17 +337,10 @@ function colorSwap()
         local refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol = getHsvParams()
         -- Restore to originals so the transaction starts from a clean slate
         restoreAll()
-        local replaced         = applySwapWithUndo(sprite,
+        local replaced = applySwapWithUndo(sprite,
             refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol)
-        -- Persist settings for next open
-        local d                = dlg.data
-        lastSettings.ref_color = d.ref_color
-        lastSettings.tgt_color = d.tgt_color
-        lastSettings.hue_tol   = d.hue_tol
-        lastSettings.sat_tol   = d.sat_tol
-        lastSettings.val_tol   = d.val_tol
-        lastSettings.preview   = d.preview
-        applied                = true
+        saveSettings()
+        applied = true
         app.refresh()
         dlg:close()
         if replaced == 0 then
@@ -333,14 +349,7 @@ function colorSwap()
     end }
 
     dlg:button { id = "cancel", text = "Cancel", onclick = function()
-        -- Persist dialog values so they survive the cancel
-        local d                = dlg.data
-        lastSettings.ref_color = d.ref_color
-        lastSettings.tgt_color = d.tgt_color
-        lastSettings.hue_tol   = d.hue_tol
-        lastSettings.sat_tol   = d.sat_tol
-        lastSettings.val_tol   = d.val_tol
-        lastSettings.preview   = d.preview
+        saveSettings()
         restoreAll()
         app.refresh()
         applied = true -- prevent double-restore in onclose
