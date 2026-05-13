@@ -1,4 +1,4 @@
-# Pramprem Lua Plugins
+# Pramprem Lua Plugins for Aseprite
 
 A collection of Aseprite Lua plugins by Pramprem.
 

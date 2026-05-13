@@ -130,12 +130,112 @@ local function applySwapWithUndo(sprite, refH, refS, refV, tgtH, tgtS, tgtV, hue
     local sel      = sprite.selection
     app.transaction("Color Swap", function()
         for _, cel in ipairs(sprite.cels) do
-            local copy = cel.image:clone()
-            local n = applySwapToImage(copy, refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol,
-                sel, cel.position.x, cel.position.y)
-            if n > 0 then
-                cel.image = copy -- assignment to cel.image is recorded by undo
-                replaced = replaced + n
+            if cel.layer.isVisible then
+                local copy = cel.image:clone()
+                local n = applySwapToImage(copy, refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol,
+                    sel, cel.position.x, cel.position.y)
+                if n > 0 then
+                    cel.image = copy -- assignment to cel.image is recorded by undo
+                    replaced = replaced + n
+                end
+            end
+        end
+    end)
+    return replaced
+end
+
+-- Applies swap to a new (or existing) layer named "Color Swap" at the top of
+-- the layer stack.  Original pixels are never modified.  Matching pixels from
+-- every layer/cel are composited onto the target layer with their swapped
+-- colours; non-matching pixels are left transparent.
+--
+-- Each frame is collected and written independently to prevent any possibility
+-- of cross-frame accumulation.  Layer identity is checked by name rather than
+-- by Lua object identity, since Aseprite may return a fresh wrapper object on
+-- each property access.
+local function applySwapToNewLayer(sprite, refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol)
+    local replaced = 0
+    local sel      = sprite.selection
+    app.transaction("Color Swap (New Layer)", function()
+        -- Find or create the "Color Swap" layer.
+        local swapLayer = nil
+        for _, layer in ipairs(sprite.layers) do
+            if layer.name == "Color Swap" then
+                swapLayer = layer
+                break
+            end
+        end
+        if not swapLayer then
+            swapLayer            = sprite:newLayer()
+            swapLayer.name       = "Color Swap"
+            swapLayer.stackIndex = #sprite.layers -- move to top
+        end
+
+        -- Process one frame at a time: collect then write before moving on.
+        -- This guarantees each frame's image is isolated and committed before
+        -- the next frame's image is even created.
+        for _, frame in ipairs(sprite.frames) do
+            local frameNum = frame.frameNumber
+            local fi       = nil -- result image for this frame (lazy init)
+            local useSel   = sel and not sel.isEmpty
+
+            -- Collect matching pixels from every visible non-swap cel on this frame.
+            for _, cel in ipairs(sprite.cels) do
+                if cel.frameNumber == frameNum and cel.layer.isVisible and cel.layer.name ~= "Color Swap" then
+                    local img  = cel.image
+                    local offX = cel.position.x
+                    local offY = cel.position.y
+
+                    for it in img:pixels() do
+                        local inSel = (not useSel) or sel:contains(Point(it.x + offX, it.y + offY))
+                        if inSel then
+                            local pixVal = it()
+                            local pr     = app.pixelColor.rgbaR(pixVal)
+                            local pg     = app.pixelColor.rgbaG(pixVal)
+                            local pb     = app.pixelColor.rgbaB(pixVal)
+                            local pa     = app.pixelColor.rgbaA(pixVal)
+                            if pa > 0 then
+                                local ph, ps, pv = rgbToHsv(pr, pg, pb)
+                                if hueDist(ph, refH) <= hueTol
+                                    and math.abs(ps - refS) <= satTol
+                                    and math.abs(pv - refV) <= valTol then
+                                    if not fi then
+                                        fi = Image(sprite.width, sprite.height, sprite.colorMode)
+                                        fi:clear(app.pixelColor.rgba(0, 0, 0, 0))
+                                    end
+                                    local dh = ph - refH
+                                    if dh > 180 then dh = dh - 360 end
+                                    if dh < -180 then dh = dh + 360 end
+                                    local newH = (tgtH + dh) % 360
+                                    local newS = clamp(tgtS + (ps - refS), 0, 1)
+                                    local newV = clamp(tgtV + (pv - refV), 0, 1)
+                                    local nr, ng, nb = hsvToRgb(newH, newS, newV)
+                                    fi:putPixel(
+                                        it.x + offX, it.y + offY,
+                                        app.pixelColor.rgba(nr, ng, nb, pa))
+                                    replaced = replaced + 1
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- Write this frame's result immediately before processing the next frame.
+            if fi then
+                local existingCel = nil
+                for _, cel in ipairs(sprite.cels) do
+                    if cel.layer.name == "Color Swap" and cel.frameNumber == frameNum then
+                        existingCel = cel
+                        break
+                    end
+                end
+                if existingCel then
+                    existingCel.image    = fi
+                    existingCel.position = Point(0, 0)
+                else
+                    sprite:newCel(swapLayer, frameNum, fi, Point(0, 0))
+                end
             end
         end
     end)
@@ -153,6 +253,7 @@ if not _colorSwapSettings then
         sat_tol   = 20,
         val_tol   = 20,
         preview   = false,
+        new_layer = false,
     }
 end
 local lastSettings = _colorSwapSettings
@@ -191,6 +292,11 @@ function colorSwap()
 
     -- applied flag: prevents onclose from restoring after a successful Apply
     local applied = false
+    -- guard flag: set to false in onclose so the sitechange listener becomes a no-op
+    local dlgActive = true
+
+    -- Forward declaration so button callbacks can reference dlg
+    local dlg
 
     local function saveSettings()
         local d                = dlg.data
@@ -200,10 +306,8 @@ function colorSwap()
         lastSettings.sat_tol   = d.sat_tol
         lastSettings.val_tol   = d.val_tol
         lastSettings.preview   = d.preview
+        lastSettings.new_layer = d.new_layer
     end
-
-    -- Forward declaration so button callbacks can reference dlg
-    local dlg
 
     local function getHsvParams()
         local data             = dlg.data
@@ -224,7 +328,7 @@ function colorSwap()
         local frameNum                                                   = app.frame.frameNumber
         local sel                                                        = sprite.selection
         for _, cel in ipairs(sprite.cels) do
-            if cel.frameNumber == frameNum then
+            if cel.frameNumber == frameNum and cel.layer.isVisible then
                 applySwapToImage(cel.image,
                     refH, refS, refV,
                     tgtH, tgtS, tgtV,
@@ -260,6 +364,7 @@ function colorSwap()
     dlg = Dialog {
         title   = "Color Swap",
         onclose = function()
+            dlgActive = false
             if not applied then
                 restoreAll()
                 app.refresh()
@@ -331,14 +436,24 @@ function colorSwap()
         end
     }
 
+    dlg:check { id = "new_layer", label = "New layer:", text = "Apply into \"Color Swap\" layer",
+        selected = lastSettings.new_layer
+    }
+
     dlg:separator {}
 
     dlg:button { id = "ok", text = "Apply", focus = true, onclick = function()
         local refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol = getHsvParams()
         -- Restore to originals so the transaction starts from a clean slate
         restoreAll()
-        local replaced = applySwapWithUndo(sprite,
-            refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol)
+        local replaced
+        if dlg.data.new_layer then
+            replaced = applySwapToNewLayer(sprite,
+                refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol)
+        else
+            replaced = applySwapWithUndo(sprite,
+                refH, refS, refV, tgtH, tgtS, tgtV, hueTol, satTol, valTol)
+        end
         saveSettings()
         applied = true
         app.refresh()
@@ -355,6 +470,18 @@ function colorSwap()
         applied = true -- prevent double-restore in onclose
         dlg:close()
     end }
+
+    -- Re-run preview whenever the user navigates to a different frame.
+    local prevSiteFrame = app.frame and app.frame.frameNumber
+    app.events:on('sitechange', function()
+        if not dlgActive then return end
+        local curFrame = app.frame and app.frame.frameNumber
+        if curFrame == prevSiteFrame then return end
+        prevSiteFrame = curFrame
+        if dlg.data.preview then
+            applyPreview()
+        end
+    end)
 
     -- Show non-blocking so we can update the preview live
     dlg:show { wait = false }
